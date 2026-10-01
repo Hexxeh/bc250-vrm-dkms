@@ -10,7 +10,6 @@
 #include <linux/string.h>
 
 #define PMBUS_PAGE                0x00
-#define PMBUS_VOUT_OV_FAULT_LIMIT 0x40
 #define PMBUS_IOUT_OC_FAULT_LIMIT 0x46
 #define PMBUS_OT_FAULT_LIMIT      0x4F
 #define PMBUS_OT_WARN_LIMIT       0x51
@@ -63,9 +62,6 @@ static umode_t bc250_vrm_is_visible(const void *data, enum hwmon_sensor_types ty
 	case hwmon_in:
 		if ((attr == hwmon_in_input || attr == hwmon_in_label) &&
 		    channel >= 0 && channel < ARRAY_SIZE(bc250_vrm_in_labels))
-			return 0444;
-		if (attr == hwmon_in_max &&
-		    channel >= 1 && channel < ARRAY_SIZE(bc250_vrm_in_labels))
 			return 0444;
 		break;
 	case hwmon_curr:
@@ -122,11 +118,7 @@ static int bc250_vrm_read(struct device *dev, enum hwmon_sensor_types type,
 			*val = (long)res * 10;
 		} else {
 			page = (u8)(channel - 1);
-			if (attr == hwmon_in_max) {
-				res = bc250_vrm_read_word(client, page, PMBUS_VOUT_OV_FAULT_LIMIT);
-			} else {
-				res = bc250_vrm_read_word(client, page, PMBUS_READ_VOUT);
-			}
+			res = bc250_vrm_read_word(client, page, PMBUS_READ_VOUT);
 			if (res < 0) { ret = res; goto unlock; }
 			*val = (long)res;
 		}
@@ -211,8 +203,8 @@ static int bc250_vrm_read_string(struct device *dev, enum hwmon_sensor_types typ
 static const struct hwmon_channel_info * const bc250_vrm_info[] = {
 	HWMON_CHANNEL_INFO(in,
 			   HWMON_I_INPUT | HWMON_I_LABEL,  /* in0 */
-			   HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX, /* in1 */
-			   HWMON_I_INPUT | HWMON_I_LABEL | HWMON_I_MAX),/* in2 */
+			   HWMON_I_INPUT | HWMON_I_LABEL,  /* in1 */
+			   HWMON_I_INPUT | HWMON_I_LABEL), /* in2 */
 	HWMON_CHANNEL_INFO(curr,
 			   HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_CRIT, /* curr0 */
 			   HWMON_C_INPUT | HWMON_C_LABEL | HWMON_C_CRIT),/* curr1 */

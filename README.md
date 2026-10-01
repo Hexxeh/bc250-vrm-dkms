@@ -10,8 +10,8 @@ It reads PMBus Page 0 (CPU VRM) and Page 1 (GPU VRM) over SMBus/I2C and exposes 
 
 Exposes the following sensors and hardware limits in `lm_sensors`:
 - **`VIN (12V Input)`**: Main input voltage (mV)
-- **`CPU Voltage`**: CPU rail voltage (mV) + Over-Voltage Limit (`in1_max`)
-- **`GPU Core Voltage`**: GPU rail voltage (mV) + Over-Voltage Limit (`in2_max`)
+- **`CPU Voltage`**: CPU rail voltage (mV)
+- **`GPU Core Voltage`**: GPU rail voltage (mV)
 - **`CPU Current`**: CPU rail current (mA) + Over-Current Critical Limit (`curr1_crit`)
 - **`GPU Current`**: GPU rail current (mA) + Over-Current Critical Limit (`curr2_crit`)
 - **`CPU VRM Temp`**: CPU VRM temperature (°C) + Warning/Critical Limits (`temp1_max`, `temp1_crit`)
