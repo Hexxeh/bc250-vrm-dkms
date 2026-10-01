@@ -7,6 +7,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/dmi.h>
+#include <linux/string.h>
 
 #define PMBUS_PAGE                0x00
 #define PMBUS_VOUT_OV_FAULT_LIMIT 0x40
@@ -31,6 +32,8 @@ struct bc250_vrm_data {
 	struct i2c_client *client;
 	struct mutex lock;
 };
+
+static struct i2c_client *bc250_vrm_client;
 
 static const char * const bc250_vrm_in_labels[] = {
 	"VIN (12V Input)",
@@ -269,49 +272,59 @@ static const struct dmi_system_id bc250_vrm_dmi_table[] = {
 };
 MODULE_DEVICE_TABLE(dmi, bc250_vrm_dmi_table);
 
-static const unsigned short bc250_vrm_i2c_addrs[] = { 0x60, I2C_CLIENT_END };
-
-static int bc250_vrm_detect(struct i2c_client *client, struct i2c_board_info *info)
-{
-	struct i2c_adapter *adapter = client->adapter;
-	s32 rev, vin;
-
-	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_READ_WORD_DATA |
-					      I2C_FUNC_SMBUS_WRITE_BYTE_DATA |
-					      I2C_FUNC_SMBUS_READ_BYTE_DATA))
-		return -ENODEV;
-
-	/* Select Page 0 */
-	if (i2c_smbus_write_byte_data(client, PMBUS_PAGE, 0x00) < 0)
-		return -ENODEV;
-
-	usleep_range(BC250_VRM_DELAY_MIN_US, BC250_VRM_DELAY_MAX_US);
-
-	/* Check PMBus revision (0x33 = PMBus 1.3) */
-	rev = i2c_smbus_read_byte_data(client, PMBUS_REVISION);
-	if (rev < 0 || rev != 0x33)
-		return -ENODEV;
-
-	/* Read 12V VIN - Must be within 10.0V to 14.0V range (1000..1400) */
-	vin = i2c_smbus_read_word_data(client, PMBUS_READ_VIN);
-	if (vin < 1000 || vin > 1400)
-		return -ENODEV;
-
-	strscpy(info->type, "bc250_vrm", I2C_NAME_SIZE);
-	return 0;
-}
-
 static struct i2c_driver bc250_vrm_driver = {
 	.driver = {
 		.name = "bc250_vrm",
 	},
 	.probe = bc250_vrm_probe,
 	.id_table = bc250_vrm_id,
-	.detect = bc250_vrm_detect,
-	.address_list = bc250_vrm_i2c_addrs,
 };
 
-module_i2c_driver(bc250_vrm_driver);
+static int bc250_vrm_instantiate_device(struct device *dev, void *data)
+{
+	struct i2c_adapter *adapter;
+	struct i2c_board_info info;
+	struct i2c_client *client;
+
+	if (dev->type != &i2c_adapter_type)
+		return 0;
+
+	adapter = to_i2c_adapter(dev);
+	if (!strstr(adapter->name, "PIIX4") || !strstr(adapter->name, "port 0"))
+		return 0;
+
+	memset(&info, 0, sizeof(info));
+	strscpy(info.type, "bc250_vrm", I2C_NAME_SIZE);
+	info.addr = 0x60;
+
+	client = i2c_new_client_device(adapter, &info);
+	if (!IS_ERR(client))
+		*(struct i2c_client **)data = client;
+
+	return 0;
+}
+
+static int __init bc250_vrm_init(void)
+{
+	int ret;
+
+	ret = i2c_add_driver(&bc250_vrm_driver);
+	if (ret)
+		return ret;
+
+	i2c_for_each_dev(&bc250_vrm_client, bc250_vrm_instantiate_device);
+	return 0;
+}
+
+static void __exit bc250_vrm_exit(void)
+{
+	if (bc250_vrm_client)
+		i2c_unregister_device(bc250_vrm_client);
+	i2c_del_driver(&bc250_vrm_driver);
+}
+
+module_init(bc250_vrm_init);
+module_exit(bc250_vrm_exit);
 
 MODULE_AUTHOR("Liam McLoughlin <hexxeh@hexxeh.net>");
 MODULE_DESCRIPTION("AMD BC-250 VRM hwmon driver");
