@@ -234,6 +234,15 @@ static int bc250_vrm_probe(struct i2c_client *client)
 	struct bc250_vrm_data *data;
 	struct device *hwmon_dev;
 
+	/*
+	 * The client at 0x60 is instantiated on every BC-250, but the VRM is only
+	 * reachable with the SMBus hardware modification. Bind only if a PMBus
+	 * device answers, so a board without the modification gets no hwmon
+	 * device full of unreadable sensors.
+	 */
+	if (i2c_smbus_read_byte_data(client, PMBUS_REVISION) < 0)
+		return -ENODEV;
+
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
