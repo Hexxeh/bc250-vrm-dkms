@@ -127,12 +127,14 @@ static int bc250_vrm_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_curr:
 		if (attr == hwmon_curr_crit) {
 			res = bc250_vrm_read_word(client, (u8)channel, PMBUS_IOUT_OC_FAULT_LIMIT);
+			if (res < 0) { ret = res; goto unlock; }
+			*val = (long)res * 100;
 		} else {
 			res = bc250_vrm_read_word(client, (u8)channel, PMBUS_READ_IOUT);
+			if (res < 0) { ret = res; goto unlock; }
+			if ((s16)res > BC250_VRM_MAX_IOUT || (s16)res < -50) { ret = -EIO; goto unlock; }
+			*val = (s16)res < 0 ? 0 : (long)(s16)res * 100;
 		}
-		if (res < 0) { ret = res; goto unlock; }
-		if (res > BC250_VRM_MAX_IOUT) { ret = -EIO; goto unlock; }
-		*val = (long)res * 100;
 		break;
 
 	case hwmon_temp:
@@ -150,10 +152,14 @@ static int bc250_vrm_read(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_power:
 		page = (u8)channel;
 		vout = bc250_vrm_read_word(client, page, PMBUS_READ_VOUT);
+		if (vout < 0) { ret = vout; goto unlock; }
 		iout = bc250_vrm_read_word(client, page, PMBUS_READ_IOUT);
-		if (vout < 0 || iout < 0) { ret = -EIO; goto unlock; }
-		if (iout > BC250_VRM_MAX_IOUT) { ret = -EIO; goto unlock; }
-		*val = (long)vout * (long)iout * 100;
+		if (iout < 0) { ret = iout; goto unlock; }
+		if ((s16)iout > BC250_VRM_MAX_IOUT || (s16)iout < -50) { ret = -EIO; goto unlock; }
+		if ((s16)iout < 0)
+			*val = 0;
+		else
+			*val = (long)vout * (long)(s16)iout * 100;
 		break;
 
 	default:
