@@ -2,9 +2,9 @@
 
 Linux kernel `hwmon` driver for reading voltage, current, temperature, and power metrics from the onboard power management IC (PMIC / VRM) on the **AMD BC-250 (Cyan Skillfish)** board.
 
-It reads PMBus Page 0 (CPU VRM) and Page 1 (GPU VRM) over SMBus/I2C and exposes standard, labeled `/sys/class/hwmon/` sensors readable by `lm_sensors` (`sensors`), `CoolerControl`, `MangoHud`, etc.
+It reads PMBus Page 0 (CPU VRM) and Page 1 (GPU VRM) over SMBus/I2C via the NCT6687 SuperIO chip and exposes standard, labeled `/sys/class/hwmon/` sensors readable by `lm_sensors` (`sensors`), `CoolerControl`, `MangoHud`, etc.
 
-> **Hardware Setup Required**: Exposing SMBus I2C telemetry lines on the BC-250 requires a small hardware modification. Refer to the [BC250 Telemetry Hardware Guide](https://github.com/onlinermm/BC250-Telemetry/blob/main/hardware.md) for details.
+Earlier versions (<1.1.0) required additional wiring - the latest versions of this module do not.
 
 ## Features
 
@@ -23,7 +23,7 @@ Exposes the following sensors and hardware limits in `lm_sensors`:
 
 ## Automatic Detection & Loading
 
-The driver includes built-in **DMI board matching** (`AMD BC-250`) and **I2C auto-probing** (`0x60`). When installed, `udev` automatically loads the module on boot and binds to the VRM hardware with zero manual configuration or systemd services needed.
+The driver includes built-in **DMI board matching** (`AMD BC-250`). When installed, `udev` automatically loads the module on boot and binds to the VRM hardware with zero manual configuration or systemd services needed.
 
 ---
 
@@ -31,12 +31,12 @@ The driver includes built-in **DMI board matching** (`AMD BC-250`) and **I2C aut
 
 ### 1. Copy source to `/usr/src/`
 ```bash
-sudo cp -r . /usr/src/bc250-vrm-1.0.0
+sudo cp -r . /usr/src/bc250-vrm-1.1.0
 ```
 
 ### 2. Register & build with DKMS
 ```bash
-sudo dkms add -m bc250-vrm -v 1.0.0
-sudo dkms build -m bc250-vrm -v 1.0.0
-sudo dkms install -m bc250-vrm -v 1.0.0
+sudo dkms add -m bc250-vrm -v 1.1.0
+sudo dkms build -m bc250-vrm -v 1.1.0
+sudo dkms install -m bc250-vrm -v 1.1.0
 ```

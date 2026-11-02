@@ -9,6 +9,8 @@
 #include <linux/dmi.h>
 #include <linux/string.h>
 
+#include "nct6687_smbus.h"
+
 #define PMBUS_PAGE                0x00
 #define PMBUS_IOUT_OC_FAULT_LIMIT 0x46
 #define PMBUS_OT_FAULT_LIMIT      0x4F
@@ -32,6 +34,7 @@ struct bc250_vrm_data {
 	struct mutex lock;
 };
 
+static struct i2c_adapter *bc250_smbus;
 static struct i2c_client *bc250_vrm_client;
 
 static const char * const bc250_vrm_in_labels[] = {
@@ -287,47 +290,52 @@ static struct i2c_driver bc250_vrm_driver = {
 	.id_table = bc250_vrm_id,
 };
 
-static int bc250_vrm_instantiate_device(struct device *dev, void *data)
-{
-	struct i2c_adapter *adapter;
-	struct i2c_board_info info;
-	struct i2c_client *client;
-
-	if (dev->type != &i2c_adapter_type)
-		return 0;
-
-	adapter = to_i2c_adapter(dev);
-	if (!strstr(adapter->name, "PIIX4") || !strstr(adapter->name, "port 0"))
-		return 0;
-
-	memset(&info, 0, sizeof(info));
-	strscpy(info.type, "bc250_vrm", I2C_NAME_SIZE);
-	info.addr = 0x60;
-
-	client = i2c_new_client_device(adapter, &info);
-	if (!IS_ERR(client))
-		*(struct i2c_client **)data = client;
-
-	return 0;
-}
-
 static int __init bc250_vrm_init(void)
 {
+	struct i2c_board_info info;
 	int ret;
 
-	ret = i2c_add_driver(&bc250_vrm_driver);
+	if (!dmi_check_system(bc250_vrm_dmi_table))
+		return -ENODEV;
+
+	/* Initialize NCT6687 hardware SMBus master adapter */
+	ret = nct6687_smbus_init(&bc250_smbus);
 	if (ret)
 		return ret;
 
-	i2c_for_each_dev(&bc250_vrm_client, bc250_vrm_instantiate_device);
+	/* Register hwmon client driver */
+	ret = i2c_add_driver(&bc250_vrm_driver);
+	if (ret) {
+		nct6687_smbus_exit(bc250_smbus);
+		bc250_smbus = NULL;
+		return ret;
+	}
+
+	/* Instantiate ISL69247 client at 0x60 on the SMBus adapter */
+	memset(&info, 0, sizeof(info));
+	strscpy(info.type, "bc250_vrm", I2C_NAME_SIZE);
+	info.addr = 0x60;
+	bc250_vrm_client = i2c_new_client_device(bc250_smbus, &info);
+	if (IS_ERR(bc250_vrm_client)) {
+		pr_warn("bc250_vrm: failed to instantiate device at 0x60\n");
+		bc250_vrm_client = NULL;
+	}
+
 	return 0;
 }
 
 static void __exit bc250_vrm_exit(void)
 {
-	if (bc250_vrm_client)
+	if (bc250_vrm_client) {
 		i2c_unregister_device(bc250_vrm_client);
+		bc250_vrm_client = NULL;
+	}
 	i2c_del_driver(&bc250_vrm_driver);
+
+	if (bc250_smbus) {
+		nct6687_smbus_exit(bc250_smbus);
+		bc250_smbus = NULL;
+	}
 }
 
 module_init(bc250_vrm_init);
@@ -336,4 +344,4 @@ module_exit(bc250_vrm_exit);
 MODULE_AUTHOR("Liam McLoughlin <hexxeh@hexxeh.net>");
 MODULE_DESCRIPTION("AMD BC-250 VRM hwmon driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.1.0");

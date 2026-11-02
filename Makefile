@@ -1,4 +1,5 @@
 obj-m += bc250_vrm.o
+bc250_vrm-y := bc250_vrm_core.o nct6687_smbus.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
