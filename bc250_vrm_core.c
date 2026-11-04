@@ -37,6 +37,20 @@ struct bc250_vrm_data {
 static struct i2c_adapter *bc250_smbus;
 static struct i2c_client *bc250_vrm_client;
 
+/* 관측 전용이며 적재 인자로 값을 덮어쓸 수 없다. */
+static int initial_page = -1;
+static int restore_page = -1;
+static int page_restore_error;
+static const struct kernel_param_ops bc250_page_diag_ops = {
+	.get = param_get_int,
+};
+module_param_cb(initial_page, &bc250_page_diag_ops, &initial_page, 0444);
+module_param_cb(restore_page, &bc250_page_diag_ops, &restore_page, 0444);
+module_param_cb(page_restore_error, &bc250_page_diag_ops, &page_restore_error, 0444);
+MODULE_PARM_DESC(initial_page, "최초로 읽은 PMBus PAGE, 아직 읽지 않았으면 -1");
+MODULE_PARM_DESC(restore_page, "복원 실패 시 유지하는 원래 PMBus PAGE");
+MODULE_PARM_DESC(page_restore_error, "최초 PAGE 복원 오류, 오류 뒤 센서 전송 중단");
+
 static const char * const bc250_vrm_in_labels[] = {
 	"VIN (12V Input)",
 	"CPU Voltage",
@@ -90,16 +104,84 @@ static umode_t bc250_vrm_is_visible(const void *data, enum hwmon_sensor_types ty
 	return 0;
 }
 
-static s32 bc250_vrm_read_word(struct i2c_client *client, u8 page, u8 reg)
+/* 호출자가 어댑터 전체를 잠근 구간에서만 사용한다. */
+static s32 bc250_vrm_xfer_unlocked(struct i2c_client *client, char direction,
+				 u8 reg, int size, u8 value)
 {
+	union i2c_smbus_data transfer = { .byte = value };
 	int ret;
 
-	ret = i2c_smbus_write_byte_data(client, PMBUS_PAGE, page);
-	if (ret < 0)
+	ret = __i2c_smbus_xfer(client->adapter, client->addr, client->flags,
+			       direction, reg, size, &transfer);
+	if (ret < 0 || direction == I2C_SMBUS_WRITE)
 		return ret;
+	return size == I2C_SMBUS_WORD_DATA ? transfer.word : transfer.byte;
+}
+
+static s32 bc250_vrm_read_word(struct i2c_client *client, u8 page, u8 reg)
+{
+	int ret, restore_ret, verified_page;
+	s32 saved_page;
+
+	/* 실패 이후 오염된 PAGE를 새 원본으로 받아들이지 않는다. */
+	if (page_restore_error)
+		return page_restore_error;
+
+	/* 같은 어댑터의 다른 Linux 소비자도 PAGE 전환에 끼어들지 못한다. */
+	i2c_lock_bus(client->adapter, I2C_LOCK_SEGMENT);
+	saved_page = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_READ,
+					    PMBUS_PAGE, I2C_SMBUS_BYTE_DATA, 0);
+	if (saved_page < 0) {
+		ret = saved_page;
+		goto unlock_bus;
+	}
+	if (initial_page < 0) {
+		initial_page = saved_page;
+		dev_info(&client->dev, "최초 PMBus 페이지 저장 initial_page=%d\n",
+			 initial_page);
+	}
+
+	if (saved_page != page) {
+		ret = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_WRITE,
+					     PMBUS_PAGE, I2C_SMBUS_BYTE_DATA, page);
+		if (ret < 0)
+			goto restore;
+		ret = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_READ,
+					     PMBUS_PAGE, I2C_SMBUS_BYTE_DATA, 0);
+		if (ret < 0)
+			goto restore;
+		if (ret != page) {
+			ret = -EIO;
+			goto restore;
+		}
+	}
 
 	usleep_range(BC250_VRM_DELAY_MIN_US, BC250_VRM_DELAY_MAX_US);
-	return i2c_smbus_read_word_data(client, reg);
+	ret = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_READ,
+				     reg, I2C_SMBUS_WORD_DATA, 0);
+restore:
+	if (saved_page != page) {
+		/* 선택 쓰기의 오류도 실제 장치 변경 여부가 불명확하므로 복원한다. */
+		restore_ret = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_WRITE,
+						     PMBUS_PAGE, I2C_SMBUS_BYTE_DATA,
+						     saved_page);
+		verified_page = bc250_vrm_xfer_unlocked(client, I2C_SMBUS_READ,
+						       PMBUS_PAGE, I2C_SMBUS_BYTE_DATA, 0);
+		/* 쓰기가 오류여도 원값 재확인에 성공하면 복원은 입증된다. */
+		if (verified_page != saved_page) {
+			restore_page = saved_page;
+			page_restore_error = restore_ret < 0 ? restore_ret :
+				(verified_page < 0 ? verified_page : -EIO);
+			dev_err(&client->dev,
+				"PMBus 페이지 복원 확인 실패 initial_page=%d restore_page=%d page_restore_error=%d actual_page=%d; 추가 전송 중단\n",
+				initial_page, restore_page, page_restore_error, verified_page);
+			ret = page_restore_error;
+		}
+	}
+
+unlock_bus:
+	i2c_unlock_bus(client->adapter, I2C_LOCK_SEGMENT);
+	return ret;
 }
 
 static int bc250_vrm_read(struct device *dev, enum hwmon_sensor_types type,
@@ -243,12 +325,7 @@ static int bc250_vrm_probe(struct i2c_client *client)
 	struct bc250_vrm_data *data;
 	struct device *hwmon_dev;
 
-	/*
-	 * The client at 0x60 is instantiated on every BC-250, but the VRM is only
-	 * reachable with the SMBus hardware modification. Bind only if a PMBus
-	 * device answers, so a board without the modification gets no hwmon
-	 * device full of unreadable sensors.
-	 */
+	/* PMBus 응답이 없는 장치에는 읽을 수 없는 hwmon 센서를 등록하지 않는다. */
 	if (i2c_smbus_read_byte_data(client, PMBUS_REVISION) < 0)
 		return -ENODEV;
 
@@ -317,11 +394,25 @@ static int __init bc250_vrm_init(void)
 	info.addr = 0x60;
 	bc250_vrm_client = i2c_new_client_device(bc250_smbus, &info);
 	if (IS_ERR(bc250_vrm_client)) {
+		ret = PTR_ERR(bc250_vrm_client);
 		pr_warn("bc250_vrm: failed to instantiate device at 0x60\n");
 		bc250_vrm_client = NULL;
+		goto fail_driver;
+	}
+	if (!bc250_vrm_client->dev.driver) {
+		ret = -ENODEV;
+		i2c_unregister_device(bc250_vrm_client);
+		bc250_vrm_client = NULL;
+		goto fail_driver;
 	}
 
 	return 0;
+
+fail_driver:
+	i2c_del_driver(&bc250_vrm_driver);
+	nct6687_smbus_exit(bc250_smbus);
+	bc250_smbus = NULL;
+	return ret;
 }
 
 static void __exit bc250_vrm_exit(void)
@@ -336,6 +427,8 @@ static void __exit bc250_vrm_exit(void)
 		nct6687_smbus_exit(bc250_smbus);
 		bc250_smbus = NULL;
 	}
+	pr_info("bc250_vrm: 해제 진단 initial_page=%d restore_page=%d page_restore_error=%d\n",
+		initial_page, restore_page, page_restore_error);
 }
 
 module_init(bc250_vrm_init);
@@ -344,4 +437,4 @@ module_exit(bc250_vrm_exit);
 MODULE_AUTHOR("Liam McLoughlin <hexxeh@hexxeh.net>");
 MODULE_DESCRIPTION("AMD BC-250 VRM hwmon driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.1.0");
+MODULE_VERSION("1.1.0.1");
